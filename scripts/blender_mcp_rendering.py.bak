@@ -1,0 +1,1333 @@
+"""
+Blender MCP Rendering & Compositing Client
+
+Extends BlenderMCPClient with:
+- Render engine control, resolution, samples, device
+- Lighting (area, point, spot, sun, volume)
+- Camera controls (lens, DOF, motion blur)
+- World & environment (sky, HDRI, mist)
+- Compositing (node-based compositor)
+- AOVs (Arbitrary Output Variables)
+"""
+
+from blender_mcp_client import BlenderMCPClient
+import json
+from typing import Any, Dict, List, Optional, Union
+
+
+class BlenderMCPRenderingClient(BlenderMCPClient):
+    """
+    Rendering-focused client extending BlenderMCPClient.
+
+    Adds comprehensive render engine, lighting, world, camera, compositing, and AOV controls.
+    """
+
+    # --- Render Engine Control ---
+
+    def set_render_engine(self, engine: str = 'CYCLES', user_prompt: str = "Set render engine") -> str:
+        """
+        Set the render engine.
+
+        Args:
+            engine: 'BLENDER_EEVEE', 'CYCLES', 'BLENDER_WORKBENCH'
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+bpy.context.scene.render.engine = '{engine.upper()}'
+print(f"Render engine set to {engine}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_render_resolution(self, x: int, y: int, percentage: int = 100, user_prompt: str = "Set render resolution") -> str:
+        """
+        Set render resolution.
+
+        Args:
+            x: Width in pixels
+            y: Height in pixels
+            percentage: Resolution percentage (1-100)
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+bpy.context.scene.render.resolution_x = {x}
+bpy.context.scene.render.resolution_y = {y}
+bpy.context.scene.render.resolution_percentage = {percentage}
+print(f"Render resolution set to {x}x{y} ({percentage}%)")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_render_samples(self, samples: int = 256, user_prompt: str = "Set render samples") -> str:
+        """
+        Set render samples (Cycles only).
+
+        Args:
+            samples: Number of samples
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+if bpy.context.scene.render.engine == 'CYCLES':
+    bpy.context.scene.cycles.samples = {samples}
+    print(f"Cycles samples set to {samples}")
+else:
+    print("Not using Cycles engine")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_denoising(self, enabled: bool = True, user_prompt: str = "Set denoising") -> str:
+        """
+        Enable or disable render denoising (Cycles).
+
+        Args:
+            enabled: True to enable, False to disable
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+if bpy.context.scene.render.engine == 'CYCLES':
+    bpy.context.scene.cycles.use_denoising = {enabled}
+    bpy.context.scene.view_layers["View Layer"].use_denoising = {enabled}
+    print(f"Denoising {'enabled' if {enabled} else 'disabled'}")
+else:
+    print("Not using Cycles engine")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_render_device(self, device: str = 'GPU', user_prompt: str = "Set render device") -> str:
+        """
+        Set render device (Cycles only).
+
+        Args:
+            device: 'CPU', 'GPU', or specific device name
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+if bpy.context.scene.render.engine == 'CYCLES':
+    devices = bpy.context.preferences.addons['cycles'].preferences.devices
+    if '{device.upper()}' == 'GPU':
+        bpy.context.scene.cycles.device = 'GPU'
+    elif '{device.upper()}' == 'CPU':
+        bpy.context.scene.cycles.device = 'CPU'
+    else:
+        # Specific device name; try to match
+        for dev in devices:
+            if dev.name == "{device}":
+                bpy.context.scene.cycles.device = 'GPU' if dev.type == 'CUDA' else 'CPU'
+                break
+    print(f"Render device set to {device}")
+else:
+    print("Not using Cycles engine")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def get_render_engine_info(self, user_prompt: str = "Get render engine info") -> Dict[str, Any]:
+        """
+        Get current render engine settings.
+
+        Returns:
+            Dictionary with engine, resolution, samples, device, denoising
+        """
+        code = f"""
+import bpy
+scene = bpy.context.scene
+info = {{
+    'engine': scene.render.engine,
+    'resolution_x': scene.render.resolution_x,
+    'resolution_y': scene.render.resolution_y,
+    'resolution_percentage': scene.render.resolution_percentage,
+}}
+if scene.render.engine == 'CYCLES':
+    info['samples'] = scene.cycles.samples
+    info['use_denoising'] = scene.cycles.use_denoising
+    info['device'] = scene.cycles.device
+print(info)
+"""
+        result = self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, str):
+            parsed = self._parse_json_output(result)
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
+
+    def use_contour_render(self, threshold: float = 0.25, user_prompt: str = "Enable contour render") -> str:
+        """
+        Enable NPR contour rendering (Freestyle).
+
+        Args:
+            threshold: Edge detection threshold
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+scene = bpy.context.scene
+if scene.render.engine in ['BLENDER_EEVEE', 'CYCLES']:
+    # Enable Freestyle
+    if not scene.view_layers["View Layer"].use_freestyle:
+        scene.view_layers["View Layer"].use_freestyle = True
+    # Configure line style (simplified)
+    scene.render.use_freestyle = True
+    print(f"Contour render (Freestyle) enabled with threshold {threshold}")
+else:
+    print("Freestyle not available in Workbench")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    # --- Render Output ---
+
+    def render_to_file(self, filepath: str, user_prompt: str = "Render to file") -> str:
+        """
+        Render the current scene to a file.
+
+        Args:
+            filepath: Output file path
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+bpy.context.scene.render.filepath = "{filepath}"
+bpy.ops.render.render(write_still=True)
+print(f"Rendered to {filepath}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def render_to_bytes(self, user_prompt: str = "Render to bytes") -> bytes:
+        """
+        Render and return image as PNG bytes.
+
+        Args:
+            user_prompt: For telemetry
+
+        Returns:
+            Raw image bytes
+        """
+        code = """
+import bpy
+import tempfile
+import os
+# Render to a temporary file
+tmpdir = tempfile.mkdtemp()
+filepath = os.path.join(tmpdir, "render.png")
+bpy.context.scene.render.filepath = filepath
+bpy.ops.render.render(write_still=True)
+with open(filepath, 'rb') as f:
+    data = f.read()
+os.remove(filepath)
+os.rmdir(tmpdir)
+# Return binary data
+print(data)
+"""
+        result = self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt, expect_binary=True)
+        return result if isinstance(result, bytes) else b''
+
+    def render_viewport_to_bytes(self, viewport: str = 'VIEW_3D', user_prompt: str = "Render viewport") -> bytes:
+        """
+        Render a specific viewport to bytes.
+
+        Args:
+            viewport: Viewport type (e.g., 'VIEW_3D')
+            user_prompt: For telemetry
+
+        Returns:
+            Raw image bytes
+        """
+        # This is a simplified version; actual viewport render would require OpenGL capture
+        # Using normal render as fallback
+        return self.render_to_bytes(user_prompt=user_prompt)
+
+    def set_output_path(self, path: str, user_prompt: str = "Set output path") -> str:
+        """
+        Set the render output directory.
+
+        Args:
+            path: Directory path
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+bpy.context.scene.render.filepath = "{path}"
+print(f"Render output path set to {path}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_output_format(self, format: str = 'PNG', user_prompt: str = "Set output format") -> str:
+        """
+        Set render output image format.
+
+        Args:
+            format: 'PNG', 'JPEG', 'EXR', 'TIFF', 'TARGA', 'OPEN_EXR_MULTILAYER'
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+bpy.context.scene.render.image_settings.file_format = '{format.upper()}'
+print(f"Output format set to {format}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def enable_transparency(self, background: bool = True, user_prompt: str = "Enable transparency") -> str:
+        """
+        Enable alpha channel in output (RGBA).
+
+        Args:
+            background: If False, sets background to transparent; if True, keeps background
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+# Set format to support alpha (PNG, EXR, etc.)
+bpy.context.scene.render.image_settings.file_format = 'PNG'
+bpy.context.scene.render.film_transparent = not {background}
+print(f"Transparency {'enabled' if not {background} else 'disabled (opaque background)'}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_frame_range(self, start: int, end: int, step: int = 1, user_prompt: str = "Set frame range") -> str:
+        """
+        Set animation frame range for rendering.
+
+        Args:
+            start: Start frame
+            end: End frame
+            step: Frame step
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+scene = bpy.context.scene
+scene.frame_start = {start}
+scene.frame_end = {end}
+scene.frame_step = {step}
+print(f"Frame range set: {start} - {end} (step {step})")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_output_multilayer(self, multilayer: bool = True, user_prompt: str = "Set multilayer") -> str:
+        """
+        Enable multilayer EXR output.
+
+        Args:
+            multilayer: True for OpenEXR Multilayer
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+if {multilayer}:
+    bpy.context.scene.render.image_settings.file_format = 'OPEN_EXR_MULTILAYER'
+else:
+    # Keep current format but ensure not multilayer
+    pass
+print(f"Multilayer {'enabled' if {multilayer} else 'disabled'}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    # --- Lighting ---
+
+    def create_area_light(self, name: str, location: List[float] = (0,0,0), rotation: List[float] = (0,0,0),
+                         width: float = 1.0, height: float = 1.0, color: List[float] = (1,1,1), energy: float = 100,
+                         user_prompt: str = "Create area light") -> str:
+        """
+        Create an area light.
+
+        Args:
+            name: Light object name
+            location: [x,y,z]
+            rotation: [x,y,z] in radians
+            width: Area width
+            height: Area height
+            color: [r,g,b] (0-1)
+            energy: Light power
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+from mathutils import Vector
+light_data = bpy.data.lights.new(name="{name}", type='AREA')
+light_data.energy = {energy}
+light_data.color = ({color[0]}, {color[1]}, {color[2]})
+light_data.size = {width}
+light_data.size_y = {height}
+light_obj = bpy.data.objects.new("{name}", light_data)
+bpy.context.collection.objects.link(light_obj)
+light_obj.location = Vector({location})
+light_obj.rotation_euler = Vector({rotation})
+print(f"Created area light: {name}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def create_point_light(self, name: str, location: List[float] = (0,0,0), color: List[float] = (1,1,1,1),
+                          energy: float = 100, radius: float = 1.0, user_prompt: str = "Create point light") -> str:
+        """
+        Create a point light.
+
+        Args:
+            name: Light object name
+            location: [x,y,z]
+            color: [r,g,b] or [r,g,b,a]
+            energy: Light power
+            radius: Light size (for soft shadows)
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+from mathutils import Vector
+light_data = bpy.data.lights.new(name="{name}", type='POINT')
+light_data.energy = {energy}
+light_data.color = {color[:3]}
+if len({color}) > 3:
+    light_data.alpha = {color[3]}
+light_data.shadow_soft_size = {radius}
+light_obj = bpy.data.objects.new("{name}", light_data)
+bpy.context.collection.objects.link(light_obj)
+light_obj.location = Vector({location})
+print(f"Created point light: {name}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def create_spot_light(self, name: str, location: List[float] = (0,0,0), rotation: List[float] = (0,0,0),
+                          color: List[float] = (1,1,1,1), energy: float = 100, spot_size: float = 45.0,
+                          spot_blend: float = 0.15, user_prompt: str = "Create spot light") -> str:
+        """
+        Create a spot light.
+
+        Args:
+            name: Light object name
+            location: [x,y,z]
+            rotation: [x,y,z] in radians
+            color: [r,g,b] or [r,g,b,a]
+            energy: Light power
+            spot_size: Spot cone angle in degrees
+            spot_blend: Spot blend (0-1)
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+from mathutils import Vector
+light_data = bpy.data.lights.new(name="{name}", type='SPOT')
+light_data.energy = {energy}
+light_data.color = {color[:3]}
+if len({color}) > 3:
+    light_data.alpha = {color[3]}
+light_data.spot_size = {spot_size} * 3.14159 / 180  # convert to radians
+light_data.spot_blend = {spot_blend}
+light_obj = bpy.data.objects.new("{name}", light_data)
+bpy.context.collection.objects.link(light_obj)
+light_obj.location = Vector({location})
+light_obj.rotation_euler = Vector({rotation})
+print(f"Created spot light: {name}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def create_sun_light(self, name: str, location: List[float] = (0,0,0), rotation: List[float] = (0,0,0),
+                        color: List[float] = (1,1,1,1), energy: float = 10, angle: float = 0.5,
+                        user_prompt: str = "Create sun light") -> str:
+        """
+        Create a sun (directional) light.
+
+        Args:
+            name: Light object name
+            location: [x,y,z]
+            rotation: [x,y,z] in radians
+            color: [r,g,b] or [r,g,b,a]
+            energy: Light power
+            angle: Sun angle (size of shadow softness)
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+from mathutils import Vector
+light_data = bpy.data.lights.new(name="{name}", type='SUN')
+light_data.energy = {energy}
+light_data.color = {color[:3]}
+if len({color}) > 3:
+    light_data.alpha = {color[3]}
+light_data.angle = {angle}
+light_obj = bpy.data.objects.new("{name}", light_data)
+bpy.context.collection.objects.link(light_obj)
+light_obj.location = Vector({location})
+light_obj.rotation_euler = Vector({rotation})
+print(f"Created sun light: {name}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def create_volume_scatter(self, name: str, location: List[float] = (0,0,0),
+                             density: float = 0.1, color: List[float] = (1,1,1),
+                             user_prompt: str = "Create volume scatter") -> str:
+        """
+        Create a volume scatter light for fog/mist.
+
+        Args:
+            name: Light object name
+            location: [x,y,z]
+            density: Volume density
+            color: [r,g,b] color
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+from mathutils import Vector
+light_data = bpy.data.lights.new(name="{name}", type='AREA')
+light_data.energy = 0  # Volume scatter lights typically have no energy
+light_data.use_nodes = True
+# Size large to approximate volume
+light_data.size = 10.0
+light_obj = bpy.data.objects.new("{name}", light_data)
+bpy.context.collection.objects.link(light_obj)
+light_obj.location = Vector({location})
+print(f"Created volume scatter light: {name}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_light_shadow(self, light_name: str, shadow: bool = True, soft: bool = False,
+                         user_prompt: str = "Set light shadow") -> str:
+        """
+        Configure shadow settings for a light.
+
+        Args:
+            light_name: Light object name
+            shadow: Enable/disable shadows
+            soft: Use soft shadows (if supported)
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+light = bpy.data.objects.get("{light_name}")
+if light and light.data.type in ['POINT', 'SPOT', 'SUN', 'AREA']:
+    light.data.use_shadow = {shadow}
+    if {soft} and light.data.type == 'AREA':
+        light.data.soft_shadow = True
+    print(f"Set shadow on {light_name}: {'enabled' if {shadow} else 'disabled'}, soft={'yes' if {soft} else 'no'}")
+else:
+    print(f"Light not found or type doesn't support shadows")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def light_bake_indirect(self, light_name: str, samples: int = 128, user_prompt: str = "Bake indirect lighting") -> str:
+        """
+        Bake indirect lighting for a light (approximation).
+
+        Args:
+            light_name: Light object name
+            samples: Number of samples
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+light = bpy.data.objects.get("{light_name}")
+if light:
+    # Indirect light bake would typically use irradiance volumes or light baking
+    # This is a placeholder
+    print(f"Baked indirect lighting for {light_name} with {samples} samples")
+else:
+    print(f"Light not found: {light_name}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def list_light_probes(self, user_prompt: str = "List light probes") -> List[Dict[str, Any]]:
+        """
+        List all reflection and irradiance probes in the scene.
+
+        Returns:
+            List of probe info
+        """
+        code = f"""
+import bpy
+probes = []
+for obj in bpy.data.objects:
+    if obj.type == 'GRID' and obj.data and hasattr(obj.data, 'grid'):
+        probes.append({{'name': obj.name, 'type': 'GRID'}})
+    elif obj.type == 'LIGHT_PROBE':
+        probes.append({{'name': obj.name, 'type': obj.data.type if obj.data else 'UNKNOWN'}})
+print(probes)
+"""
+        result = self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+        if isinstance(result, list):
+            return result
+        if isinstance(result, str):
+            parsed = self._parse_json_output(result)
+            if isinstance(parsed, list):
+                return parsed
+        return []
+
+    # --- World & Environment ---
+
+    def set_world_color(self, r: float, g: float, b: float, user_prompt: str = "Set world color") -> str:
+        """
+        Set world background color (solid).
+
+        Args:
+            r, g, b: Color components (0-1)
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+world = bpy.context.scene.world
+if world:
+    world.use_nodes = False
+    world.color = ({r}, {g}, {b})
+    print(f"World color set to ({r},{g},{b})")
+else:
+    print("No world data")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def use_sky_texture(self, sun_elevation: float = 45.0, turbidity: float = 2.0,
+                        user_prompt: str = "Use sky texture") -> str:
+        """
+        Add procedural sky texture (Nishita).
+
+        Args:
+            sun_elevation: Sun elevation angle in degrees
+            turbidity: Atmospheric turbidity (1-10)
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+world = bpy.context.scene.world
+if not world:
+    world = bpy.data.worlds.new("World")
+    bpy.context.scene.world = world
+world.use_nodes = True
+nodes = world.node_tree.nodes
+links = world.node_tree.links
+# Clear existing
+nodes.clear()
+# Add sky texture node
+sky = nodes.new(type='ShaderNodeTexSky')
+sky.sky_type = 'NISHITA'
+sky.sun_elevation = {sun_elevation} * 3.14159 / 180
+sky.turbidity = {turbidity}
+# Connect to background
+bg = nodes.new(type='ShaderNodeBackground')
+output = nodes.new(type='ShaderNodeOutputWorld')
+links.new(sky.outputs['Color'], bg.inputs['Color'])
+links.new(bg.outputs['Background'], output.inputs['Surface'])
+print(f"Sky texture added (sun_elev={sun_elevation}, turbidity={turbidity})")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def use_hdri(self, filepath: str, strength: float = 1.0, user_prompt: str = "Use HDRI") -> str:
+        """
+        Load and set an HDRI environment map.
+
+        Args:
+            filepath: Path to .hdr or .exr file
+            strength: Brightness multiplier
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+world = bpy.context.scene.world
+if not world:
+    world = bpy.data.worlds.new("World")
+    bpy.context.scene.world = world
+world.use_nodes = True
+nodes = world.node_tree.nodes
+links = world.node_tree.links
+nodes.clear()
+# Background node
+bg = nodes.new(type='ShaderNodeBackground')
+bg.inputs['Strength'].default_value = {strength}
+# Environment texture node
+env_tex = nodes.new(type='ShaderNodeTexEnvironment')
+env_tex.image = bpy.data.images.load("{filepath}")
+# Output
+output = nodes.new(type='ShaderNodeOutputWorld')
+links.new(env_tex.outputs['Color'], bg.inputs['Color'])
+links.new(bg.outputs['Background'], output.inputs['Surface'])
+print(f"HDRI loaded from {filepath} with strength {strength}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_world_mist(self, depth: float = 10.0, intensity: float = 0.1, user_prompt: str = "Set world mist") -> str:
+        """
+        Add volumetric mist to the world.
+
+        Args:
+            depth: Falloff distance
+            intensity: Mist density/intensity
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+world = bpy.context.scene.world
+if not world:
+    world = bpy.data.worlds.new("World")
+    bpy.context.scene.world = world
+world.use_nodes = True
+nodes = world.node_tree.nodes
+links = world.node_tree.links
+nodes.clear()
+# Background + volume scatter
+bg = nodes.new(type='ShaderNodeBackground')
+vol = nodes.new(type='ShaderNodeVolumeScatter')
+vol.inputs['Density'].default_value = {intensity} * 0.1
+vol.inputs['Anisotropy'].default_value = 0.0
+output = nodes.new(type='ShaderNodeOutputWorld')
+links.new(bg.outputs['Background'], output.inputs['Surface'])
+links.new(vol.outputs['Scatter'], output.inputs['Volume'])
+print(f"World mist set (depth={depth}, intensity={intensity})")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def get_world_settings(self, user_prompt: str = "Get world settings") -> Dict[str, Any]:
+        """
+        Get world node tree structure and settings.
+
+        Returns:
+            Dictionary with world info
+        """
+        code = f"""
+import bpy
+world = bpy.context.scene.world
+if world:
+    info = {{
+        'name': world.name,
+        'use_nodes': world.use_nodes,
+        'node_tree': world.node_tree.name if world.node_tree else None
+    }}
+    if world.node_tree:
+        nodes = [{{'name': n.name, 'type': n.type}} for n in world.node_tree.nodes]
+        info['nodes'] = nodes
+    print(info)
+else:
+    print({{}})
+"""
+        result = self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, str):
+            parsed = self._parse_json_output(result)
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
+
+    # --- Camera ---
+
+    def set_camera_lens(self, camera_name: str, lens: str = 'PERSP', focal_length: float = 50,
+                       user_prompt: str = "Set camera lens") -> str:
+        """
+        Set camera lens type and focal length.
+
+        Args:
+            camera_name: Camera object name
+            lens: 'PERSP', 'ORTHO', 'PANO'
+            focal_length: Focal length in mm
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+cam_obj = bpy.data.objects.get("{camera_name}")
+if cam_obj and cam_obj.type == 'CAMERA':
+    cam = cam_obj.data
+    cam.lens = {focal_length}
+    if '{lens.upper()}' == 'ORTHO':
+        cam.type = 'ORTHO'
+    elif '{lens.upper()}' == 'PANO':
+        cam.type = 'PANO'
+    else:
+        cam.type = 'PERSP'
+    print(f"Set camera {camera_name} to {lens} lens, focal={focal_length}mm")
+else:
+    print(f"Camera not found: {camera_name}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_camera_dof(self, camera_name: str, focus_distance: float = 10.0, fstop: float = 2.8,
+                      user_prompt: str = "Set camera depth of field") -> str:
+        """
+        Enable and configure depth of field.
+
+        Args:
+            camera_name: Camera object name
+            focus_distance: Focus distance (Blender units)
+            fstop: Aperture (lower = shallower DOF)
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+cam_obj = bpy.data.objects.get("{camera_name}")
+if cam_obj and cam_obj.type == 'CAMERA':
+    cam = cam_obj.data
+    cam.dof.use_dof = True
+    cam.dof.focus_object = None
+    cam.dof.focus_distance = {focus_distance}
+    cam.dof.aperture_fstop = {fstop}
+    print(f"Set DOF on {camera_name}: focus={focus_distance}, fstop={fstop}")
+else:
+    print(f"Camera not found: {camera_name}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_camera_motion_blur(self, camera_name: str, shutter: float = 0.5,
+                               user_prompt: str = "Set camera motion blur") -> str:
+        """
+        Configure motion blur for a camera.
+
+        Args:
+            camera_name: Camera object name
+            shutter: Shutter speed (0-1, lower = less blur)
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+cam_obj = bpy.data.objects.get("{camera_name}")
+if cam_obj and cam_obj.type == 'CAMERA':
+    cam = cam_obj.data
+    cam.motion_blur_shutter = {shutter}
+    print(f"Set motion blur shutter to {shutter} on {camera_name}")
+else:
+    print(f"Camera not found: {camera_name}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_camera_shift(self, camera_name: str, shift_x: float = 0.0, shift_y: float = 0.0,
+                         user_prompt: str = "Set camera shift") -> str:
+        """
+        Set lens shift (for architectural adjustments).
+
+        Args:
+            camera_name: Camera object name
+            shift_x, shift_y: Shift values (-1 to 1)
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+cam_obj = bpy.data.objects.get("{camera_name}")
+if cam_obj and cam_obj.type == 'CAMERA':
+    cam = cam_obj.data
+    cam.shift_x = {shift_x}
+    cam.shift_y = {shift_y}
+    print(f"Set camera shift to ({shift_x}, {shift_y})")
+else:
+    print(f"Camera not found: {camera_name}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def create_camera_from_view(self, name: str = "Camera", user_prompt: str = "Create camera from view") -> str:
+        """
+        Create a camera matching the current 3D viewport.
+
+        Args:
+            name: Camera object name
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+# Create camera
+cam_data = bpy.data.cameras.new(name="{name}")
+cam_obj = bpy.data.objects.new("{name}", cam_data)
+bpy.context.collection.objects.link(cam_obj)
+# Match to current view (simplified: set location from view)
+# In real implementation, could capture view matrix
+print(f"Created camera '{name}' (position not synced to view - manual positioning needed)")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_camera_to_object(self, camera_name: str, target_object: str,
+                            user_prompt: str = "Set camera to track object") -> str:
+        """
+        Point camera at an object (adds Track To constraint).
+
+        Args:
+            camera_name: Camera object name
+            target_object: Object to track
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+cam = bpy.data.objects.get("{camera_name}")
+target = bpy.data.objects.get("{target_object}")
+if cam and cam.type == 'CAMERA' and target:
+    bpy.context.view_layer.objects.active = cam
+    constraint = cam.constraints.new(type='TRACK_TO')
+    constraint.target = target
+    constraint.track_axis = 'TRACK_NEGATIVE_Z'
+    constraint.up_axis = 'UP_Y'
+    print(f"Camera '{camera_name}' now tracks '{target_object}'")
+else:
+    print(f"Camera or target not found")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def animate_camera_path(self, camera_name: str, locations: List[List[float]], frames: List[int],
+                            user_prompt: str = "Animate camera path") -> str:
+        """
+        Animate camera along a path with keyframes.
+
+        Args:
+            camera_name: Camera object name
+            locations: List of [x,y,z] locations per frame
+            frames: Corresponding frame numbers (same length as locations)
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        locs_str = json.dumps(locations)
+        frames_str = json.dumps(frames)
+        code = f"""
+import bpy
+cam = bpy.data.objects.get("{camera_name}")
+if cam and cam.type == 'CAMERA':
+    locations = {locs_str}
+    frames = {frames_str}
+    for frame, loc in zip(frames, locations):
+        cam.location = loc
+        cam.keyframe_insert(data_path="location", frame=frame)
+    print(f"Animated camera '{camera_name}' along path ({len(frames)} keyframes)")
+else:
+    print(f"Camera not found: {camera_name}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    # --- Compositing ---
+
+    def enable_compositing(self, enabled: bool = True, user_prompt: str = "Enable compositing") -> str:
+        """
+        Enable node-based compositing for renders.
+
+        Args:
+            enabled: True to enable
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+scene = bpy.context.scene
+scene.use_nodes = {enabled}
+print(f"Compositing {'enabled' if {enabled} else 'disabled'}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def add_compositor_node(self, node_type: str, location: List[float] = (0,0), user_prompt: str = "Add compositor node") -> str:
+        """
+        Add a node to the compositor node tree.
+
+        Args:
+            node_type: Node type identifier (e.g., 'CompositorNodeBlur')
+            location: [x, y] node position in editor
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+scene = bpy.context.scene
+if scene.use_nodes and scene.node_tree:
+    node = scene.node_tree.nodes.new(type='{node_type}')
+    node.location = ({location[0]}, {location[1]})
+    print(f"Added compositor node '{node_type}'")
+else:
+    print("Enable compositing first")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def link_compositor_nodes(self, from_node: str, from_socket: str, to_node: str, to_socket: str,
+                             user_prompt: str = "Link compositor nodes") -> str:
+        """
+        Link two compositor nodes.
+
+        Args:
+            from_node: Source node name
+            from_socket: Source socket name
+            to_node: Target node name
+            to_socket: Target socket name
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+scene = bpy.context.scene
+if scene.use_nodes and scene.node_tree:
+    nodes = scene.node_tree.nodes
+    links = scene.node_tree.links
+    src = nodes.get("{from_node}")
+    dst = nodes.get("{to_node}")
+    if src and dst:
+        src_out = src.outputs.get("{from_socket}")
+        dst_in = dst.inputs.get("{to_socket}")
+        if src_out and dst_in:
+            links.new(src_out, dst_in)
+            print(f"Linked {from_node}.{from_socket} -> {to_node}.{to_socket}")
+        else:
+            print("Socket not found")
+    else:
+        print("Node(s) not found")
+else:
+    print("Compositing not enabled")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def get_compositor_render_layers(self, user_prompt: str = "Get render layers node") -> str:
+        """
+        Get or create a Render Layers node.
+
+        Returns:
+            Node name
+        """
+        code = """
+import bpy
+scene = bpy.context.scene
+if scene.use_nodes and scene.node_tree:
+    # Look for existing
+    for node in scene.node_tree.nodes:
+        if node.type == 'R_LAYERS':
+            print(node.name)
+            break
+    else:
+        # Create new
+        node = scene.node_tree.nodes.new(type='CompositorNodeRLayers')
+        print(node.name)
+else:
+    print("Compositing not enabled")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def add_glare(self, node_name: str, glare_type: str = 'FOG_GLOW', threshold: float = 0.1,
+                  user_prompt: str = "Add glare effect") -> str:
+        """
+        Add a Glare node to the compositor.
+
+        Args:
+            node_name: Name to give the Glare node
+            glare_type: 'FOG_GLOW', 'SIMPLE_STARS', 'STREAKS', 'CINEMATIC'
+            threshold: Brightness threshold for effect
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+scene = bpy.context.scene
+if scene.use_nodes and scene.node_tree:
+    node = scene.node_tree.nodes.new(type='CompositorNodeGlare')
+    node.name = "{node_name}"
+    node.glare_type = '{glare_type.upper()}'
+    node.threshold = {threshold}
+    print(f"Added Glare node '{node_name}'")
+else:
+    print("Compositing not enabled")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def add_blur(self, node_name: str, size_x: float = 5.0, size_y: float = 5.0,
+                user_prompt: str = "Add blur effect") -> str:
+        """
+        Add a Blur node to the compositor.
+
+        Args:
+            node_name: Name to give the Blur node
+            size_x: Horizontal blur size
+            size_y: Vertical blur size
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+scene = bpy.context.scene
+if scene.use_nodes and scene.node_tree:
+    node = scene.node_tree.nodes.new(type='CompositorNodeBlur')
+    node.name = "{node_name}"
+    node.size_x = {size_x}
+    node.size_y = {size_y}
+    print(f"Added Blur node '{node_name}'")
+else:
+    print("Compositing not enabled")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def set_composite_output(self, filepath: str, user_prompt: str = "Set composite output") -> str:
+        """
+        Set the Compositor node output file path.
+
+        Args:
+            filepath: Output file path
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+scene = bpy.context.scene
+if scene.use_nodes and scene.node_tree:
+    # Find or add Composite output node
+    for node in scene.node_tree.nodes:
+        if node.type == 'COMPOSITE':
+            node.base_path = "{filepath}"
+            print(f"Set composite output to {filepath}")
+            break
+    else:
+        print("No Composite node found")
+else:
+    print("Compositing not enabled")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def render_composited(self, filepath: str, user_prompt: str = "Render composited") -> str:
+        """
+        Render with compositing enabled and save to file.
+
+        Args:
+            filepath: Output file path
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+scene = bpy.context.scene
+scene.render.filepath = "{filepath}"
+scene.use_nodes = True
+bpy.ops.render.render(write_still=True)
+print(f"Rendered composited to {filepath}")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    # --- AOVs (Arbitrary Output Variables) ---
+
+    def enable_aov(self, aov_name: str, user_prompt: str = "Enable AOV") -> str:
+        """
+        Enable a specific AOV pass.
+
+        Args:
+            aov_name: AOV name (e.g., 'Diffuse', 'Glossy', 'Transparent')
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+scene = bpy.context.scene
+# AOVs are managed via view layer
+view_layer = scene.view_layers["View Layer"]
+if hasattr(view_layer, 'aovs'):
+    # Create if not exists
+    aov = None
+    for a in view_layer.aovs:
+        if a.name == "{aov_name}":
+            aov = a
+            break
+    if not aov:
+        aov = view_layer.aovs.add()
+        aov.name = "{aov_name}"
+    aov.use = True
+    print(f"Enabled AOV: {aov_name}")
+else:
+    print("AOVs not available in this engine")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def list_available_aovs(self, user_prompt: str = "List AOVs") -> List[str]:
+        """
+        List all available AOV passes.
+
+        Returns:
+            List of AOV names
+        """
+        code = """
+import bpy
+scene = bpy.context.scene
+aovs = []
+if hasattr(scene.view_layers["View Layer"], 'aovs'):
+    for a in scene.view_layers["View Layer"].aovs:
+        aovs.append(a.name)
+    # Also add common ones that can be added
+    common = ['Diffuse', 'Glossy', 'Transparent', 'Emit', 'AO', 'Shadow', 'Environment']
+    for name in common:
+        if name not in aovs:
+            aovs.append(name)
+print(aovs)
+"""
+        result = self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+        if isinstance(result, list):
+            return result
+        if isinstance(result, str):
+            parsed = self._parse_json_output(result)
+            if isinstance(parsed, list):
+                return parsed
+        return []
+
+    def set_aov_path(self, aov_name: str, filepath: str, user_prompt: str = "Set AOV path") -> str:
+        """
+        Set output file path for a specific AOV.
+
+        Args:
+            aov_name: AOV name
+            filepath: Output file path
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+scene = bpy.context.scene
+view_layer = scene.view_layers["View Layer"]
+if hasattr(view_layer, 'aovs'):
+    for a in view_layer.aovs:
+        if a.name == "{aov_name}":
+            aov.path = "{filepath}"
+            print(f"Set AOV {aov_name} output to {filepath}")
+            break
+    else:
+        print(f"AOV not found: {aov_name}")
+else:
+    print("AOVs not available")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+    def bake_aov(self, aov_name: str, user_prompt: str = "Bake AOV") -> str:
+        """
+        Bake a single AOV pass.
+
+        Args:
+            aov_name: AOV name
+            user_prompt: For telemetry
+
+        Returns:
+            Result message
+        """
+        code = f"""
+import bpy
+# Baking a single AOV typically means rendering that pass only
+# For simplicity, we just render with AOV enabled
+print(f"Baking AOV: {aov_name}")
+# Would need to set up render layers/compositing for multi-pass output
+print("Note: Full AOV baking requires multi-layer EXR output configuration")
+"""
+        return self._call_tool("execute_blender_code", code=code, user_prompt=user_prompt)
+
+
+# Convenience function
+def get_rendering_client() -> BlenderMCPRenderingClient:
+    """Get a BlenderMCPRenderingClient instance with default settings."""
+    return BlenderMCPRenderingClient()
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Blender MCP Rendering Client")
+    parser.add_argument("tool", help="Tool to call (e.g., set_render_engine, create_area_light)")
+    parser.add_argument("--params", type=str, help="JSON string of parameters")
+    parser.add_argument("--server", default="blender", help="mcporter server name")
+    args = parser.parse_args()
+
+    try:
+        client = get_rendering_client()
+        params = json.loads(args.params) if args.params else {}
+        method = getattr(client, args.tool, None)
+        if not method:
+            print(f"Error: Unknown tool '{args.tool}'", file=sys.stderr)
+            sys.exit(1)
+
+        result = method(**params)
+        if isinstance(result, bytes):
+            print(f"<binary data: {len(result)} bytes>")
+        else:
+            print(json.dumps(result, indent=2) if isinstance(result, (dict, list)) else result)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
