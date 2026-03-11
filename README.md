@@ -1,10 +1,6 @@
 # Blender MCP Skill – Comprehensive Documentation
 
-**Version:** 0.2.0 (enhanced)
-**Date:** 2026-03-03
-**Repository:** `skills/blender-mcp-skill/` (within your OpenClaw workspace)
-
----
+Just Download This and Put it in your Openclaw_Workspace Folder, and ask your agent to Explore the Skill!
 
 ## 📖 Table of Contents
 
